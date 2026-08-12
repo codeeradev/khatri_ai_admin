@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState, useTransition } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -15,11 +15,6 @@ import {
   X,
 } from "lucide-react";
 
-import {
-  deleteKnowledgeDocumentAction,
-  reindexKnowledgeDocumentAction,
-  toggleKnowledgeDocumentAction,
-} from "@/app/actions/knowledge";
 import type { KnowledgeDocument, KnowledgeStatus } from "@/lib/knowledge";
 
 type KnowledgeManagerProps = {
@@ -42,6 +37,9 @@ const languageNames: Record<KnowledgeDocument["language"], string> = {
   hinglish: "Hinglish",
 };
 
+// `basePath` is /admin, and fetch() does not add it automatically.
+const knowledgeApiUrl = (path = "") => `/admin/api/admin/knowledge${path}`;
+
 function readableSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -56,7 +54,7 @@ export function KnowledgeManager({ initialDocuments, loadError }: KnowledgeManag
   const [notice, setNotice] = useState<{ type: "success" | "error"; text: string } | null>(
     loadError ? { type: "error", text: loadError } : null,
   );
-  const [pending, startTransition] = useTransition();
+  const [pending, setPending] = useState(false);
 
   const hasActiveIndexing = documents.some((document) => (
     document.enabled && (document.status === "uploaded" || document.status === "processing")
@@ -73,12 +71,14 @@ export function KnowledgeManager({ initialDocuments, loadError }: KnowledgeManag
     setUploading(true);
     setNotice(null);
     try {
-      const response = await fetch("/api/admin/knowledge/upload", {
+      const response = await fetch(knowledgeApiUrl("/upload"), {
         method: "POST",
         body: new FormData(event.currentTarget),
       });
-      const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.error || "Upload failed.");
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || `Upload failed (${response.status}).`);
+      }
       setShowUpload(false);
       setNotice({ type: "success", text: "Document uploaded. Indexing has started." });
       router.refresh();
@@ -91,44 +91,63 @@ export function KnowledgeManager({ initialDocuments, loadError }: KnowledgeManag
 
   function toggleDocument(document: KnowledgeDocument) {
     const enabled = !document.enabled;
-    startTransition(async () => {
-      const result = await toggleKnowledgeDocumentAction(document._id, enabled);
-      if (!result.success) {
-        setNotice({ type: "error", text: result.error || "Could not update document." });
-        return;
-      }
+    setPending(true);
+    void (async () => {
+      try {
+        const response = await fetch(knowledgeApiUrl(`/${encodeURIComponent(document._id)}/enabled`), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || !result?.success) throw new Error(result?.error || "Could not update document.");
       setNotice({
         type: "success",
         text: enabled ? "Document enabled. Re-indexing has started." : "Document disabled and vectors removed.",
       });
       router.refresh();
-    });
+      } catch (error) {
+        setNotice({ type: "error", text: error instanceof Error ? error.message : "Could not update document." });
+      } finally {
+        setPending(false);
+      }
+    })();
   }
 
   function reindexDocument(document: KnowledgeDocument) {
-    startTransition(async () => {
-      const result = await reindexKnowledgeDocumentAction(document._id);
-      if (!result.success) {
-        setNotice({ type: "error", text: result.error || "Could not re-index document." });
-        return;
+    setPending(true);
+    void (async () => {
+      try {
+        const response = await fetch(knowledgeApiUrl(`/${encodeURIComponent(document._id)}/reindex`), { method: "POST" });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || !result?.success) throw new Error(result?.error || "Could not re-index document.");
+        setNotice({ type: "success", text: "Re-indexing has started." });
+        router.refresh();
+      } catch (error) {
+        setNotice({ type: "error", text: error instanceof Error ? error.message : "Could not re-index document." });
+      } finally {
+        setPending(false);
       }
-      setNotice({ type: "success", text: "Re-indexing has started." });
-      router.refresh();
-    });
+    })();
   }
 
   function deleteDocument(document: KnowledgeDocument) {
     if (!window.confirm(`Delete “${document.title}”, its file, and all indexed vectors?`)) return;
-    startTransition(async () => {
-      const result = await deleteKnowledgeDocumentAction(document._id);
-      if (!result.success) {
-        setNotice({ type: "error", text: result.error || "Could not delete document." });
-        return;
+    setPending(true);
+    void (async () => {
+      try {
+        const response = await fetch(knowledgeApiUrl(`/${encodeURIComponent(document._id)}`), { method: "DELETE" });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || !result?.success) throw new Error(result?.error || "Could not delete document.");
+        setDocuments((current) => current.filter((item) => item._id !== document._id));
+        setNotice({ type: "success", text: "Document, file, and vectors deleted." });
+        router.refresh();
+      } catch (error) {
+        setNotice({ type: "error", text: error instanceof Error ? error.message : "Could not delete document." });
+      } finally {
+        setPending(false);
       }
-      setDocuments((current) => current.filter((item) => item._id !== document._id));
-      setNotice({ type: "success", text: "Document, file, and vectors deleted." });
-      router.refresh();
-    });
+    })();
   }
 
   return (
@@ -240,7 +259,7 @@ export function KnowledgeManager({ initialDocuments, loadError }: KnowledgeManag
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 sm:px-7">
               <div>
                 <h2 className="text-lg font-semibold text-slate-950">Upload knowledge document</h2>
-                <p className="mt-0.5 text-xs text-slate-500">Maximum file size: 10MB</p>
+                <p className="mt-0.5 text-xs text-slate-500">No file-size limit in the panel</p>
               </div>
               <button aria-label="Close upload" className="flex size-9 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" disabled={uploading} onClick={() => setShowUpload(false)} type="button">
                 <X aria-hidden="true" className="size-5" />
@@ -262,7 +281,8 @@ export function KnowledgeManager({ initialDocuments, loadError }: KnowledgeManag
                 </label>
                 <label className="space-y-2 text-sm font-medium text-slate-700">
                   Category / topic
-                  <input className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-amber-500 focus:ring-4 focus:ring-amber-500/10" name="category" placeholder="History" required />
+                  <input aria-describedby="category-help" className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-amber-500 focus:ring-4 focus:ring-amber-500/10" name="category" placeholder="e.g. Khatri history, gotras, kuldevis" required />
+                  <span className="block text-xs font-normal leading-5 text-slate-500" id="category-help">A short label to organize this document and make it easier to identify in search results.</span>
                 </label>
               </div>
               <label className="block space-y-2 text-sm font-medium text-slate-700">
