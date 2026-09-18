@@ -1,12 +1,10 @@
 {
-  "name": "khatri_ai_panel",
-  "version": "0.1.0",
+  "name": "project",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build --webpack",
-    "start": "next start",
-    "lint": "eslint"
+    "build": "node canary.js && tsc",
+    "prepare": "node canary.js"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
